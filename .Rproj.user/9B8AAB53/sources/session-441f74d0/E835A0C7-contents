@@ -1,0 +1,20 @@
+# Convert country to factor first
+df_ordered <- df_ordered %>% mutate(country = factor(country))
+
+# Get the reference country (first level)
+ref_country <- levels(df_ordered$country)[1]
+
+df_fit <- df_ordered %>%
+  mutate(
+    fitted_logit_lm = fitted(fe_lm),
+    fitted_qx_lm    = 1 / (1 + exp(-fitted_logit_lm)),
+    resid_logit_lm  = logit_qx - fitted_logit_lm,
+    resid_qx_lm     = qx - fitted_qx_lm,
+    
+    country_fe = if_else(
+      country == ref_country,
+      coef(fe_lm)["(Intercept)"],
+      coef(fe_lm)["(Intercept)"] +
+        coef(fe_lm)[paste0("factor(country)", as.character(country))]
+    )
+  )

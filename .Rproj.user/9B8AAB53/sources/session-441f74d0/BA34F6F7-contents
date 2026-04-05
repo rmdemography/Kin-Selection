@@ -1,0 +1,64 @@
+# build label dataframe before factor conversion
+beta_labels <- summary_df %>%
+  distinct(beta, beta_val) %>%
+  mutate(
+    label = case_when(
+      beta == "gm"    ~ paste0("beta[gm]==", formatC(beta_val, format = "f", digits = 3)),
+      beta == "os"    ~ paste0("beta[os]==", formatC(beta_val, format = "f", digits = 3)),
+      beta == "age_m" ~ paste0("beta[ma]==", formatC(beta_val, format = "f", digits = 3))
+    )
+  ) %>%
+  mutate(beta = factor(beta,
+                       levels = c("gm", "os", "age_m"),
+                       labels = c("bold(beta[gm])", "bold(beta[os])", "bold(beta[ma])")
+  ))
+
+# then apply factor conversion to summary_df as before
+summary_df$beta <- factor(
+  summary_df$beta,
+  levels = c("gm", "os", "age_m"),
+  labels = c("bold(beta[gm])", "bold(beta[os])", "bold(beta[ma])")
+)
+
+ggplot(summary_df, aes(x = country, y = beta_sens, fill = country, color = country)) +
+  geom_bar(stat = "identity", linewidth = 0.7, width = 0.6) +
+  geom_text(
+    data        = beta_labels,
+    aes(x = Inf, y = Inf, label = label),
+    inherit.aes = FALSE,
+    parse       = TRUE,
+    hjust       = 1.1,
+    vjust       = 1.5,
+    size        = 3.5,
+    color       = "black"
+  ) +
+  facet_wrap(~ beta, labeller = label_parsed) +
+  geom_hline(yintercept = 0, linewidth = 0.3, color = "gray40") +
+  scale_x_discrete(labels = c("FRATNP" = "France", "JPN" = "Japan", "SWE" = "Sweden")) +
+  scale_fill_manual(
+    values = c("FRATNP" = alpha(col1[1], 0.7), "JPN" = alpha(col1[2], 0.7), "SWE" = alpha(col1[3], 0.57)),
+    labels = c("FRATNP" = "France", "JPN" = "Japan", "SWE" = "Sweden")
+  ) +
+  scale_color_manual(
+    values = c("FRATNP" = col1[1], "JPN" = col1[2], "SWE" = col1[3]),
+    labels = c("FRATNP" = "France", "JPN" = "Japan", "SWE" = "Sweden")
+  ) +
+  labs(
+    x     = NULL,
+    fill  = "Country",
+    color = "Country",
+    y     = expression(bold("Sensitivity") ~ (d*lambda / d*beta[k]))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(,
+    strip.text         = element_text(size = 14, face = "bold"),
+    axis.text          = element_text(size = 12),
+    axis.title         = element_text(size = 14, face = "bold"),
+    legend.text        = element_text(size = 12),
+    legend.title       = element_text(size = 14, face = "bold"),
+    legend.position    = "bottom",
+    panel.border       = element_rect(fill = NA, color = "black"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    plot.margin        = margin(1, 1, 1, 1, "cm")
+  )

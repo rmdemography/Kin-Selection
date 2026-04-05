@@ -1,0 +1,136 @@
+# =============================================================================
+# Manually reconstruct fitted qx — FINAL CORRECT VERSION
+#
+# The within (FE) transformation demeans the data before estimation.
+# plm::fitted() returns values on the DEMEANED scale (centred near 0),
+# not on the original logit(qx) scale (centred near -4 to -5).
+# To get back to the original scale we must add the grand mean of logit_qx.
+# =============================================================================
+
+library(tidyverse); library(ggplot2); library(patchwork)
+
+# ── Step 1: Coefficients ──────────────────────────────────────────────────────
+b <- coef(fe_primary)
+cat("Coefficients:\n"); print(b)
+
+# ── Step 2: Compute Xb on original (un-demeaned) scale ───────────────────────
+df_ordered <- df %>% arrange(country, Year)
+
+Xb_raw <- b["gm"]    * df_ordered$gm    +
+  b["os"]    * df_ordered$os    +
+  b["age_m"] * df_ordered$age_m
+
+# ── Step 3: Extract fixed effects correctly via lm() ─────────────────────────
+# Regress logit_qx on covariates + country dummies + year dummies using lm().
+# This works entirely on the original scale with no demeaning.
+
+fe_lm <- lm(logit_qx ~ gm + os + age_m +
+              factor(country) + factor(Year),
+            data = df_ordered)
+
+# Coefficients on covariates from lm (should match plm closely)
+b_lm <- coef(fe_lm)[c("gm", "os", "age_m")]
+cat("\nCoefficients from lm (should match plm):\n")
+print(round(b_lm, 6))
+cat("Coefficients from plm:\n")
+print(round(b, 6))
+
+# ── Step 4: Reconstruct fitted logit and qx ───────────────────────────────────
+df_fit <- df_ordered %>%
+  mutate(
+    # Use lm fitted values directly — these ARE on the original logit scale
+    fitted_logit_lm = fitted(fe_lm),
+    fitted_qx_lm    = 1 / (1 + exp(-fitted_logit_lm)),
+    resid_logit_lm  = logit_qx - fitted_logit_lm,
+    resid_qx_lm     = qx - fitted_qx_lm,
+    
+    # Also show the manual calculation using lm coefficients
+    # Get country and year FE values from lm
+    country_fe = case_when(
+      country == levels(df_ordered$country)[1] ~ coef(fe_lm)["(Intercept)"],
+      TRUE ~ coef(fe_lm)["(Intercept)"] +
+        coef(fe_lm)[paste0("factor(country)", as.character(country))]
+    )
+  )
+
+# Year FEs from lm
+year_levels <- levels(factor(df_ordered$Year))
+ref_year    <- year_levels[1]   # reference year (coefficient = 0)
+year_coef_names <- paste0("factor(Year)", year_levels[-1])
+year_coef_vals  <- coef(fe_lm)[year_coef_names]
+names(year_coef_vals) <- year_levels[-1]
+
+df_fit <- df_fit %>%
+  mutate(
+    year_fe = ifelse(
+      as.character(Year) == ref_year, 0,
+      year_coef_vals[as.character(Year)]
+    ),
+    # Full manual reconstruction
+    fitted_logit_manual = country_fe + year_fe + b_lm["gm"]*gm +
+      b_lm["os"]*os + b_lm["age_m"]*age_m,
+    fitted_qx_manual    = 1 / (1 + exp(-fitted_logit_manual))
+  )
+
+# ── Step 5: Verify ────────────────────────────────────────────────────────────
+diff_lm <- df_fit$fitted_logit_lm - df_fit$fitted_logit_manual
+cat("\n── Verification (lm fitted vs manual) ──\n")
+cat(sprintf("Max absolute difference:  %.2e\n", max(abs(diff_lm))))
+
+cat("\nSanity check — first 10 rows:\n")
+print(dplyr::select(df_fit, country, Year, qx,
+                    fitted_logit_manual, fitted_qx_manual, resid_qx_lm) %>%
+        head(10), digits = 5)
+
+cat("\nOverall fit (qx scale):\n")
+cat(sprintf("  RMSE: %.6f\n", sqrt(mean(df_fit$resid_qx_lm^2))))
+cat(sprintf("  MAE:  %.6f\n", mean(abs(df_fit$resid_qx_lm))))
+cat(sprintf("  Cor:  %.6f\n", cor(df_fit$qx, df_fit$fitted_qx_lm)))
+
+# ── Step 6: Note on plm vs lm coefficients ────────────────────────────────────
+cat("\n── Note ──\n")
+cat("plm (within estimator) and lm with dummies give identical slope\n")
+cat("coefficients. They differ only in how they parameterise the intercept.\n")
+cat("The lm approach works on the original scale so fitted() is correct.\n")
+
+# ── Step 7: Save ──────────────────────────────────────────────────────────────
+write_csv(
+  dplyr::select(df_fit, country, Year, qx, logit_qx, gm, os, age_m,
+                country_fe, year_fe,
+                fitted_logit_manual, fitted_qx_manual,
+                resid_logit_lm, resid_qx_lm),
+  "fitted_qx_final.csv"
+)
+cat("\nSaved: fitted_qx_final.csv\n")
+
+# ── Step 8: Plot ──────────────────────────────────────────────────────────────
+clrs <- c(FRATNP = "#d73027", JPN = "#4575b4", SWE = "#1a9850")
+
+p_fit <- dplyr::select(df_fit, country, Year,
+                       Observed = qx, Fitted = fitted_qx_manual) %>%
+  pivot_longer(c(Observed, Fitted), names_to = "series", values_to = "qx") %>%
+  ggplot(aes(Year, qx, colour = country, linetype = series)) +
+  geom_line(linewidth = 0.85) +
+  scale_colour_manual(values = clrs) +
+  scale_linetype_manual(values = c(Observed = "solid", Fitted = "dashed")) +
+  facet_wrap(~country, scales = "free_y", ncol = 1) +
+  labs(title    = "Observed vs Manually Fitted qx",
+       subtitle = "fitted = inv_logit(alpha_i + delta_t + b_gm·gm + b_os·os + b_age·age_m)",
+       x = "Year", y = "qx", colour = NULL, linetype = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title    = element_text(face = "bold"),
+        plot.subtitle = element_text(colour = "grey40", size = 9),
+        legend.position = "bottom", strip.text = element_text(face = "bold"))
+
+p_resid <- ggplot(df_fit, aes(Year, resid_qx_lm, colour = country)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line(linewidth = 0.7) +
+  scale_colour_manual(values = clrs) +
+  labs(title = "Residuals (Observed − Fitted qx)",
+       x = "Year", y = "Residual qx", colour = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom")
+
+# ggsave("fitted_qx_final.png", p_fit / p_resid, width = 8, height = 10, dpi = 150)
+# cat("Saved: fitted_qx_final.png\n")
+print(p_fit / p_resid)

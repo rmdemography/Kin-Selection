@@ -1,0 +1,344 @@
+#------------------------------------------------------------------------------#
+# Paper:  Kin selection and population dynamics
+# Title:  Construct LRO inputs
+# Data:   HMD & HFD
+# Author: Rahul Mondal
+# Date:   02/04/2026
+#------------------------------------------------------------------------------#
+pacman::p_load(Matrix)
+# survival matrix: U_t
+construct_U <- function(df){
+  nt <- length(unique(df$Year))
+  na <- length(unique(df$Age))
+  Uvec <- lapply(split(df, df$Year), function(d){
+    1-d$qx[order(d$Age)]
+  })
+  Ut <- list()
+  for(yr in names(Uvec)){
+    s <- Uvec[[yr]]
+    U <- matrix(0, na, na)
+    for(i in 1:(na-1)){
+      U[i+1,i] <- s[i]
+    }
+    Ut[[yr]] <- U
+  }
+  return(Ut)
+}
+
+try.Ut <- construct_U(df)
+# Block diagonal U
+Ublock <- bdiag(try.Ut)
+
+# vec permutation matrix K
+vec_permutation_mat <- function(g,s){
+  gs <- g*s
+  from_id <- integer(gs)
+  to_id <- integer(gs)
+  k <- 1L
+  for(i in 1:g)for(j in 1:s){
+    from_id[k] <- (i-1L)*s+j
+    to_id[k] <- (j-1L)*g+i
+    k <- k+1L
+  }
+  K <- sparseMatrix(
+    i = to_id,
+    j = from_id,
+    x = rep(1,gs),
+    dims = c(gs,gs)
+  )
+  return(K)
+}
+K <- vec_permutation_mat(g = 74, s = 111)
+
+# IID environmental transition matrix: D[g,g]
+construct_D <- function(g,s){
+  prob <- rep(1/g,g)
+  gs <- g*s
+  D_j <- Matrix(prob %o% rep(1,g), sparse = TRUE)
+  D <- kronecker(Diagonal(s),D_j)
+  return(D)
+}
+D <- construct_D(g=74, s=111)
+
+construct_Utilde <- function(D, K, Ublock){
+  Kt <- t(K)
+  step1 <- Ublock %*% Kt
+  step2 <- K %*% step1
+  Utilde <- D %*% step2
+  return(Utilde)
+}
+try.utilde <- construct_Utilde(D, K, Ublock)
+
+construct_ftilde <- function(fx, K, g, s){
+  fvec <- as.vector(fx)
+  ftilde <- as.vector(K%*%fvec)
+  return(ftilde)
+}
+try.ftilde <- construct_ftilde(fx,K,74,111)
+
+construct_R1tilde <- function(ftilde, g,s){
+  gs <- g*s
+  ftilde_Z <- c(ftilde,0)
+  ones <- rep(1, gs+1)
+  R1tilde <- Matrix(outer(ones, ftilde_Z), sparse = TRUE)
+  return(R1tilde)
+}
+try.R1tilde <- construct_R1tilde(try.ftilde, g = 74, s = 111)
+
+construct_Ptilde <- function(Utilde, g, s){
+  gs <- g*s
+  dvec <- 1-colSums(Utilde)
+  Ptilde <- rbind(cbind(Utilde, Matrix(0, gs, 1)), Matrix(c(dvec,1),1, gs+1))
+  return(Ptilde)
+}
+try.Ptilde <- construct_Ptilde(try.utilde, 74,111)
+
+compute_rho1 <- function(Ptilde, ftilde, Utilde, g,s){
+  gs <- g*s
+  ftilde_full <- c(ftilde,0)
+  PR <- Ptilde %*% Diagonal(x=ftilde_full)
+  v <- colSums(PR)[1:gs]
+  N <- Diagonal(gs)-t(Utilde)
+  rho1 <- solve(N,v)
+  return(as.vector(rho1))
+}
+try.rho1 <- compute_rho1(try.Ptilde, try.ftilde, try.utilde, 74,111)
+
+compute_sensitivity <- function(Utilde, ftilde, g, s, rho1, i){
+  gs <- g*s
+  alpha <- 1L
+  K <- vec_permutation_mat(g,s)
+  N <- Diagonal(gs)-Utilde
+  N_factor <- Matrix::lu(t(N))
+  Ptilde <- construct_Ptilde(Utilde, g, s)
+  ftilde_Z <- c(ftilde,0)
+  ones <- rep(1, gs+1)
+  R1vec <- rep(ftilde_Z, each = gs+1)
+  # R1vec <- as.vector(outer(ones, ftilde_Z))
+  K1 <- vec_permutation_mat(gs+1, gs+1)
+  K2 <- vec_permutation_mat(gs, gs)
+  embed_alive <- rbind(Diagonal(gs), matrix(0, alpha, gs))
+  embed_dead <- rbind(Matrix(0, gs, alpha), Diagonal(alpha))
+  C1 <- kronecker(embed_alive, embed_alive)
+  C2 <- kronecker(embed_alive, embed_dead)
+  I1 <- kronecker(Diagonal(gs), Matrix(1,1,gs))
+  dPdU <- C1-C2 %*% I1
+  Zmat <- cbind(Diagonal(gs), Matrix(0,gs,1))
+  Z1 <- kronecker(Matrix(1,1,gs+1), Zmat)
+  DvecR1_dPdU <- .sparseDiagonal(x=R1vec)%*%dPdU
+  inner1 <- Z1 %*% K1 %*% DvecR1_dPdU
+  rho1I <- kronecker(Matrix(rho1, 1, gs), Diagonal(gs))
+  inner2 <- rho1I %*% K2
+  bracket <- inner1+inner2
+  sens_vecU <- solve(t(N), bracket)
+  dvecU_dqi <- dvecUtilde_dqi(K,g,s,i)
+  drho1_dqi <- sens_vecU %*% dvecU_dqi
+  return(drho1_dqi)
+}
+
+dvecUtilde_dqi <- function(K, g, s, i){
+  gs <- g*s
+  D <- construct_D(g,s)
+  rid <- 2:s
+  cid <- 1:(s-1)
+  vec_id <- (cid-1)*s+rid
+  dvecUi_dqi <- sparseMatrix(
+    i = vec_id,
+    j = 1:(s-1),
+    x = rep(-1, s-1),
+    dims = c(s^2,s)
+  )
+  Li <- sparseMatrix(
+    i = ((i-1)*s+1):(i*s),
+    j = 1:s,
+    x = rep(1,s),
+    dims = c(gs, s)
+  )
+  Qi <- t(Li)
+  QL <- kronecker(t(Qi), Li)
+  KDK <- kronecker(K, D %*% K)
+  dvecUtilde_dqi <- KDK %*% QL %*% dvecUi_dqi
+  return(dvecUtilde_dqi)
+}
+try.sens <- compute_sensitivity(try.utilde, try.ftilde, 74, 111, try.rho1,1)
+
+compute_sensitivity <- function(Utilde, ftilde, g, s, rho1, ei){
+  gs <- g*s
+  alpha <- 1L
+  pi <- rep(1/g, g)
+  ftilde_z <- c(ftilde,0)
+  Nt <- t(Diagonal(gs) - Utilde)
+  Nfactor <- Matrix::lu(Nt)
+  drho1_dqi <- Matrix(0, gs, s, sparse = TRUE)
+  for(a in 0:(s-2)){
+    colU <- a*g+ei
+    rowU <- (a+1)*g+(1:g)
+    # term 1
+    t1 <- numeric(gs)
+    t1[colU] <- -ftilde_z[colU]
+    # term 2
+    t2 <- numeric(gs)
+    t2[colU] <- -sum(pi*rho1[rowU])
+    rhs <- t1+t2
+    drho1_dqi[,a+1] <- solve(Nfactor, rhs)
+  }
+}
+
+sensitivity_beta <- function(Utilde, ftilde, g, s, rho1, ei, 
+                             kin, params, which.perturb, qx, eps){
+  gs <- g*s
+  pi <- rep(1/g,g)
+  qvec <- qpert_fn(kin, params, which.perturb, qx, eps)
+  qpert <- qvec+eps
+  drho1_dqi <- compute_sensitivity(Utilde, ftilde, g, s, rho1, ei)
+  dq_dtheta <- numeric(s)
+  for(a in 1:s){
+    dq_dtheta[a] <- (qpert[a]-qvec[a])/eps
+  }
+  drho1_dthetai <- Matrix(0, gs, s, sparse = TRUE)
+  for(a in 1:s){
+    drho1_dthetai[,a] <- drho1_dqi[,a]*dq_dtheta[a]
+  }
+  return(drho1_dthetai)
+}
+
+qpert_fn <- function(kin, params, which.perturb, qx, eps){
+  nt <- length(qx)
+  kins <- extract_kin(kin)
+  parameters[["betas"]][[which.perturb]]<-params[["betas"]][[which.perturb]]+eps
+  q0 <- rep(0, nt)
+  for(t in 1:nt){
+    logit_q0 = parameters$intercept + parameters$deltas + 
+      parameters$kappas[years[t]] + parameters$betas["gm"]*kins$gm[t]+ 
+      parameters$betas["os"]*kins$os[t]+ parameters$betas["age_m"]*kins$age_m[t]
+    q0[t] <- plogis(logit_q0)
+    qx[[t]][1] <- q0[t]
+  }
+  return(qx)
+}
+
+rho1_df <- function(rho1, g, s){
+  gs <- g*s
+  ages <- 0:110
+  years <- 1950:2023
+  rho1mat <- matrix(rho1, g, s)
+  rho1mat <- t(rho1mat)
+  rownames(rho1mat) <- ages
+  colnames(rho1mat) <- years
+  return(rho1mat)
+}
+
+rho1_sensq_df <- function(drho1_dqi, g, s){
+  gs <- g*s
+  ages <- 0:110
+  years <- 1950:2023
+  sensmat <- as.matrix(drho1_dqi)
+  s0_row <- 1:g
+  sens_s0 <- sensmat[s0_row,]
+  rownames(sens_s0) <- years
+  colnames(sens_s0) <- ages
+  # average over starting environment
+  sens_s0_mean <- colMeans(sens_s0)
+  names(sens_s0_mean) <- ages
+  
+  list(sensmat, sens_s0, sens_s0_mean)
+}
+rho1_sensbeta_df <- function(drho1_dthetai, g, s){
+  gs <- g*s
+  ages <- 0:110
+  years <- 1950:2023
+  sensvec <- as.vector(drho1_dthetai[,1])
+  sensmat <- matrix(sensvec, g,s)
+  sensmat <- t(sensmat)
+  rownames(sensmat) <- ages
+  colnames(sensmat) <- years
+  sens_s <- rowMeans(sensmat)
+  sens_g <- colMeans(sensmat)
+  sens_s0 <- sensmat[1,]
+  sens_s0_mean <- mean(sens_s0)
+  
+  list(sensmat = sensmat, sens_s = sens_s, sens_g = sens_g,
+       sens_s0 = sens_s0, sens_s0_mean = sens_s0_mean)
+}
+
+# run full loop
+g <- 74
+s <- 111
+gs <- g*s
+years <- 1950:2023
+countries <- names(result)
+betas <- names(params$betas)
+nc <- length(countries)
+np <- length(betas)
+sensall <- vector("list", nc)
+names(sensall) <- countries
+
+for(ctry in countries){
+  cat("Country:", ctry, "\n")
+  
+  #input
+  df <- result[[ctry]]$df
+  fx <- result[[ctry]]$fx
+  kin <- result[[ctry]]$kin$kin_summary
+  
+  Ui <- construct_U(df)$Ut
+  qvec <- construct_U(df)$qx
+  K <- vec_permutation_mat(g,s)
+  D <- construct_D(g,s)
+  Utilde <- construct_Utilde(D, K, Ui)
+  ftilde <- construct_ftilde(fx, K, g, s)
+  Ptilde <- construct_Ptilde(Utilde, g, s)
+  rho1 <- compute_rho1(Ptilde, ftilde, Utilde, g, s)
+  
+  sensall[[ctry]] <- vector("list", np)
+  names(sensall[[ctry]]) <- betas
+  for(beta in betas){
+    cat("\n Beta:", beta, "\n")
+    params_c <- params
+    params_c$deltas <- params_c$deltas[ctry]
+    qpert <- qpert_fn(kin = kin, params = params_c, which.perturb = beta,
+                      qx = qvec, eps = 0.01)
+    sensmat <- matrix(0, gs, g)
+    colnames(sensmat) <- years
+    for(ei in 1:g){
+      cat("Environment", ei, "of", g, "(year", years[ei], ")\r")
+      sensbetai <- sensitivity_beta(Utilde = Utilde, ftilde = ftilde, g = g, s = s, 
+                                   rho1 = rho1, ei = ei, qvec = qvec[[ei]], 
+                                   qpert = qpert[[ei]], eps = 0.01)
+      sensmat[,ei] <- as.vector(sensbetai[,1])
+    }
+    sensall[[ctry]][[beta]] <- sensmat
+  }
+}
+
+sensall2df <- function(sensall, g, s, ages, years){
+  countries <- names(sensall)
+  betas <- names(sensall[[1]])
+  gs <- g*s
+  
+  dflist <- list()
+  for(ctry in countries)for(beta in betas){
+    sensmat <- sensall[[ctry]][[beta]]
+    k <- 1:gs
+    start_age <- floor((k-1)/g)
+    start_env <- ((k-1)%%g)+1
+    dfwide <- as.data.frame(sensmat)
+    colnames(dfwide) <- as.character(years)
+    dflong <- dfwide %>% 
+      mutate(
+        start_age = start_age,
+        start_year = years[start_env],
+        country = ctry,
+        beta = beta
+      ) %>% 
+      pivot_longer(
+        cols = as.character(years),
+        names_to = "pert_year",
+        values_to = "sensitivity"
+      ) %>% 
+      mutate(pert_year = as.integer(pert_year))
+    dflist[[paste(ctry, beta, sep = "_")]] <- dflong
+  }
+  dffull <- bind_rows(dflist)
+  return(dffull)
+}

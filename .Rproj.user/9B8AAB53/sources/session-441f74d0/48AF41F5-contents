@@ -1,0 +1,227 @@
+# =============================================================================
+# Back-Prediction Check: Can model coefficients recover observed qx?
+# Requires: df and fe_primary already in environment from main analysis script
+# =============================================================================
+
+library(tidyverse); library(ggplot2); library(patchwork)
+
+# =============================================================================
+# 1. EXTRACT COMPONENTS
+# =============================================================================
+# The two-way FE model estimates:
+#   logit(qx)_it = alpha_i + delta_t + b1*gm_it + b2*os_it + b3*age_m_it + e_it
+#
+# plm's fitted() returns:  alpha_i + delta_t + Xb  (full fitted value)
+# residuals() returns:     e_it
+# We can also isolate the Xb part (covariate contribution only)
+
+b       <- coef(fe_primary)          # b1, b2, b3
+Xb      <- as.numeric(                # covariate-only contribution (no FEs)
+  model.matrix(fe_primary) %*% b
+)
+
+# Full fitted logit(qx) and back-transformed qx
+fitted_logit <- as.numeric(fitted(fe_primary))
+fitted_qx    <- 1 / (1 + exp(-fitted_logit))   # inverse logit
+
+# Country + year FE contribution alone (fitted - Xb)
+fe_contribution <- fitted_logit - Xb
+
+# Build results data frame
+df_pred <- df %>%
+  arrange(country, Year) %>%
+  mutate(
+    fitted_logit    = fitted_logit,
+    fitted_qx       = fitted_qx,
+    Xb              = Xb,                        # beta*X: covariate signal
+    fe_only         = fe_contribution,           # alpha_i + delta_t
+    resid_logit     = logit_qx - fitted_logit,
+    resid_qx        = qx - fitted_qx,
+    # Naive prediction using ONLY covariate signal + grand mean
+    # (strips out FEs to show what grandmothers alone contribute)
+    grand_mean_logit = mean(logit_qx),
+    naive_logit      = grand_mean_logit + Xb - mean(Xb),
+    naive_qx         = 1 / (1 + exp(-naive_logit))
+  )
+
+# =============================================================================
+# 2. PREDICTION ACCURACY METRICS
+# =============================================================================
+
+metrics <- function(obs, pred, label) {
+  resid <- obs - pred
+  data.frame(
+    model  = label,
+    RMSE   = round(sqrt(mean(resid^2)), 6),
+    MAE    = round(mean(abs(resid)), 6),
+    MaxErr = round(max(abs(resid)), 6),
+    Cor    = round(cor(obs, pred), 6),
+    R2     = round(1 - sum(resid^2) / sum((obs - mean(obs))^2), 6)
+  )
+}
+
+acc <- bind_rows(
+  metrics(df_pred$qx, df_pred$fitted_qx,  "Full FE model (alpha_i + delta_t + Xb)"),
+  metrics(df_pred$qx, df_pred$naive_qx,   "Covariates only (Xb, no FEs)")
+)
+
+cat("\n╔══════════════════════════════════════════════════════════╗")
+cat("\n║          BACK-PREDICTION ACCURACY (qx scale)            ║")
+cat("\n╚══════════════════════════════════════════════════════════╝\n\n")
+print(acc, row.names = FALSE)
+
+cat("\n── Per-country accuracy (full model) ──\n")
+per_country <- df_pred %>%
+  group_by(country) %>%
+  summarise(
+    RMSE   = round(sqrt(mean(resid_qx^2)), 6),
+    MAE    = round(mean(abs(resid_qx)), 6),
+    MaxErr = round(max(abs(resid_qx)), 6),
+    Cor    = round(cor(qx, fitted_qx), 6),
+    .groups = "drop"
+  )
+print(per_country)
+
+# =============================================================================
+# 3. DECOMPOSE: HOW MUCH DOES THE GM COEFFICIENT CONTRIBUTE?
+# =============================================================================
+# Counterfactual: what if gm were held at its country-specific mean?
+# i.e. remove the within-country variation in gm's contribution
+
+df_pred <- df_pred %>%
+  group_by(country) %>%
+  mutate(
+    gm_mean_country   = mean(gm),
+    # Fitted logit with gm fixed at country mean (removes gm's temporal signal)
+    fitted_nogm_logit = fitted_logit - b["gm"] * (gm - gm_mean_country),
+    fitted_nogm_qx    = 1 / (1 + exp(-fitted_nogm_logit)),
+    # The gm contribution to fitted qx (approximate, linearised)
+    gm_contribution_logit = b["gm"] * (gm - gm_mean_country),
+    gm_contribution_qx    = fitted_qx - fitted_nogm_qx
+  ) %>%
+  ungroup()
+
+cat("\n── Grandmother's contribution to fitted qx (mean absolute, by country) ──\n")
+gm_contrib <- df_pred %>%
+  group_by(country) %>%
+  summarise(
+    mean_abs_gm_contrib_qx = round(mean(abs(gm_contribution_qx)), 6),
+    max_abs_gm_contrib_qx  = round(max(abs(gm_contribution_qx)), 6),
+    mean_gm_contrib_logit  = round(mean(gm_contribution_logit), 6),
+    .groups = "drop"
+  )
+print(gm_contrib)
+
+# =============================================================================
+# 4. VISUALISATION
+# =============================================================================
+
+clrs <- c(FRATNP = "#d73027", JPN = "#4575b4", SWE = "#1a9850")
+
+# ── Plot 1: Observed vs predicted qx over time (per country) ─────────────────
+p_time <- df_pred %>%
+  select(country, Year, Observed = qx, `Full model` = fitted_qx,
+         `Covariates only` = naive_qx) %>%
+  pivot_longer(c(Observed, `Full model`, `Covariates only`),
+               names_to = "series", values_to = "qx") %>%
+  mutate(series = factor(series, levels = c("Observed", "Full model", "Covariates only"))) %>%
+  ggplot(aes(Year, qx, colour = series, linetype = series)) +
+  geom_line(linewidth = 0.85) +
+  facet_wrap(~country, scales = "free_y", ncol = 1) +
+  scale_colour_manual(values = c(Observed          = "black",
+                                 `Full model`      = "#2166ac",
+                                 `Covariates only` = "#d73027")) +
+  scale_linetype_manual(values = c(Observed          = "solid",
+                                   `Full model`      = "dashed",
+                                   `Covariates only` = "dotted")) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 0.001)) +
+  labs(title    = "Observed vs Back-Predicted Infant Mortality (qx)",
+       subtitle = "Full model = alpha_i + delta_t + Xb | Covariates only = Xb (no FEs)",
+       x = "Year", y = "qx (probability of infant death)",
+       colour = NULL, linetype = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title    = element_text(face = "bold"),
+        plot.subtitle = element_text(colour = "grey40", size = 9),
+        legend.position = "bottom",
+        strip.text = element_text(face = "bold"))
+
+# ── Plot 2: Observed vs fitted scatter (full model) ──────────────────────────
+p_scatter <- ggplot(df_pred, aes(fitted_qx, qx, colour = country)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_point(alpha = 0.55, size = 1.8) +
+  scale_colour_manual(values = clrs) +
+  scale_x_continuous(labels = scales::label_number(accuracy = 0.001)) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 0.001)) +
+  labs(title    = "Observed vs Fitted qx",
+       subtitle = "Points on dashed line = perfect prediction",
+       x = "Fitted qx (full model)", y = "Observed qx (HMD)",
+       colour = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title    = element_text(face = "bold"),
+        plot.subtitle = element_text(colour = "grey40", size = 9),
+        legend.position = "bottom")
+
+# ── Plot 3: Grandmother's marginal contribution to fitted qx over time ────────
+p_gm_contrib <- ggplot(df_pred, aes(Year, gm_contribution_qx, colour = country)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line(linewidth = 0.85) +
+  scale_colour_manual(values = clrs) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 0.0001)) +
+  labs(title    = "Grandmother Coefficient's Contribution to Fitted qx",
+       subtitle = "beta_gm × (gm_it − gm_i_mean): within-country temporal signal only",
+       x = "Year", y = "Δqx attributable to gm variation",
+       colour = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title    = element_text(face = "bold"),
+        plot.subtitle = element_text(colour = "grey40", size = 9),
+        legend.position = "bottom")
+
+# ── Plot 4: Residuals over time ───────────────────────────────────────────────
+p_resid_time <- ggplot(df_pred, aes(Year, resid_qx, colour = country)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line(linewidth = 0.7, alpha = 0.8) +
+  scale_colour_manual(values = clrs) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 0.0001)) +
+  labs(title    = "Residuals Over Time (qx scale)",
+       subtitle = "Observed − Fitted | systematic patterns suggest model misfit",
+       x = "Year", y = "Residual qx",
+       colour = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title    = element_text(face = "bold"),
+        plot.subtitle = element_text(colour = "grey40", size = 9),
+        legend.position = "bottom")
+
+# ── Combine ───────────────────────────────────────────────────────────────────
+right_col   <- (p_scatter / p_gm_contrib / p_resid_time)
+final_plot  <- (p_time | right_col) +
+  plot_annotation(
+    title   = "Back-Prediction Check: Model Coefficients vs Observed HMD qx",
+    caption = "Two-way FE model: logit(qx) ~ gm + os + age_m + country FE + year FE",
+    theme   = theme(plot.title   = element_text(face = "bold", size = 13),
+                    plot.caption = element_text(colour = "grey50", size = 8))
+  )
+
+ggsave("backpredict_check.png", final_plot, width = 14, height = 11, dpi = 150)
+cat("\nSaved: backpredict_check.png\n")
+print(final_plot)
+
+# =============================================================================
+# 5. DIGEST
+# =============================================================================
+cat("\n", strrep("─", 62), "\n")
+cat("BACK-PREDICTION DIGEST\n")
+cat(strrep("─", 62), "\n")
+cat("Full model (with country + year FEs):\n")
+cat(sprintf("  RMSE = %.6f  |  MAE = %.6f  |  Cor = %.6f\n",
+            acc$RMSE[1], acc$MAE[1], acc$Cor[1]))
+cat("Covariates only (no FEs — grandmother signal alone):\n")
+cat(sprintf("  RMSE = %.6f  |  MAE = %.6f  |  Cor = %.6f\n",
+            acc$RMSE[2], acc$MAE[2], acc$Cor[2]))
+cat(strrep("─", 62), "\n")
+cat("Interpretation:\n")
+cat("  The gap between the two rows shows how much of the\n")
+cat("  prediction accuracy comes from country/year FEs vs\n")
+cat("  the grandmother (and sibling/age) coefficients alone.\n")
+cat("  A large gap means FEs carry most of the prediction;\n")
+cat("  a small gap means the covariates themselves track qx well.\n")
+cat(strrep("─", 62), "\n")
