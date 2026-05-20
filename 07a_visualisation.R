@@ -1,0 +1,106 @@
+#------------------------------------------------------------------------------#
+# Paper:  Kin selection and population dynamics
+# Title:  Visualisation
+# Data:   HMD & HFD
+# Author: Rahul Mondal
+# Date:   04/04/2026
+#------------------------------------------------------------------------------#
+pacman::p_load(tidyverse, ggplot2, RColorBrewer)
+
+# load sensitivity results
+load("result/lambdasens.RData")
+load("result/lrosens_mean.RData")
+df_fig <- lambdasens %>% 
+  rename("lambda_sens" = "beta_sens") %>% 
+  left_join(sens_mean, by = c("country", "beta")) %>% 
+  rename("lro_sens" = "sensitivity") %>% 
+  mutate(
+    type = ifelse(country %in% c("Ethiopia", "Gambia"), "type-1", 
+                  ifelse(country %in% c("Bangladesh", "India"), "type-2", "type-3"))
+  ) %>% 
+  select(type, everything()) %>% 
+  arrange(type, country, beta)
+
+# color palettes
+display.brewer.all(colorblindFriendly = TRUE)
+col1 <- c(
+  brewer.pal(9,"PuRd")[8],
+  brewer.pal(9,"Reds")[8],
+  brewer.pal(9,"YlGn")[8],
+  brewer.pal(9,"YlGnBu")[8],
+  brewer.pal(9,"YlOrBr")[8]
+)
+
+# countries
+countries <- c("Ethiopia", "Gambia", "Bangladesh", "India", "Japan")
+
+# slope coefficients
+gamma_names <- c(
+  gm  = "gamma[g]",
+  m   = "gamma[d]",
+  os  = "gamma[m<=10]",
+  oso = "gamma[m>10]"
+)
+
+# panel titles
+df_fig <- df_fig %>%
+  pivot_longer(cols = c(lambda_sens, lro_sens),
+               names_to = "metric", values_to = "value") %>%
+  mutate(
+    country = factor(country, levels = countries),
+    metric  = factor(metric, levels = c("lambda_sens", "lro_sens"),
+                     labels = c("paste(bold('(A) Growth Rate sensitivity  '), frac(d*lambda[s], d*gamma))",
+                                "paste(bold('(B) LRO sensitivity  '), frac(d*tilde(rho[1]), d*gamma))"))
+  )
+
+# plot
+plot_list <- lapply(c("gm", "m", "os", "oso"), function(b) {
+  df_b     <- df_fig %>% filter(beta == b)
+  beta_val <- round(unique(df_b$beta_val), 3)
+  
+  p <- ggplot(df_b, aes(x = country, y = value, fill = country)) +
+    geom_col(aes(colour = country), width = 0.6, alpha = 1, linewidth = 0.3) +
+    scale_fill_manual(values = col1) +
+    scale_colour_manual(values = col1) +
+    guides(colour = "none") +
+    facet_wrap(~ metric, nrow = 1, scales = "free", labeller = label_parsed) +
+    labs(title = parse(text = paste0(gamma_names[b], " == ", beta_val))[[1]],
+         x = "Population", y = "Sensitivity") +
+    theme_minimal() +
+    theme(
+      panel.grid.major.x = element_blank(),
+      legend.position    = "none",
+      strip.text         = element_text(size = 12, hjust = 0.5),
+      strip.background   = element_blank(),
+      axis.text.y        = element_text(size = 10, color = "black"),
+      axis.text.x        = element_text(size = 9.5, color = "black"),
+      axis.title.y       = element_text(size = 12, face = "bold", 
+                                        margin = margin(r = 0.5, unit = "cm")),
+      axis.title.x       = element_text(size = 12, face = "bold", 
+                                        margin = margin(t = 1.5, unit = "cm")),
+      panel.spacing      = unit(0.8, "lines"),
+      plot.title         = element_text(face = "bold", hjust = 0.5, size = 12),
+      plot.margin        = margin(0.5,0.5,0.5,0.5,"cm")
+    ) +
+    annotation_custom(segmentsGrob(x0 = 0.02, x1 = 0.38, y0 = -0.12, y1 = -0.12,
+                                   default.units = "npc", gp = gpar(col = "grey30", lwd = 0.8))) +
+    annotation_custom(segmentsGrob(x0 = 0.42, x1 = 0.78, y0 = -0.12, y1 = -0.12,
+                                   default.units = "npc", gp = gpar(col = "grey30", lwd = 0.8))) +
+    annotation_custom(segmentsGrob(x0 = 0.82, x1 = 0.98, y0 = -0.12, y1 = -0.12,
+                                   default.units = "npc", gp = gpar(col = "grey30", lwd = 0.8))) +
+    annotation_custom(textGrob("type-1", x = 0.20, y = -0.18, default.units = "npc",
+                               gp = gpar(col = "grey30", fontsize = 12, fontface = "bold.italic"))) +
+    annotation_custom(textGrob("type-2", x = 0.60, y = -0.18, default.units = "npc",
+                               gp = gpar(col = "grey30", fontsize = 12, fontface = "bold.italic"))) +
+    annotation_custom(textGrob("type-3", x = 0.90, y = -0.18, default.units = "npc",
+                               gp = gpar(col = "grey30", fontsize = 12, fontface = "bold.italic"))) +
+    coord_cartesian(clip = "off")
+  
+  ggsave(paste0("figures/gamma_", b, ".png"), plot = p, width = 20, height = 12, units = "cm", dpi = 300)
+  p
+})
+
+plot_list[[1]]
+plot_list[[2]]
+plot_list[[3]]
+plot_list[[4]]
